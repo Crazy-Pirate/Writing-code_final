@@ -47,7 +47,7 @@ def run_vignettes_experiment_raw(vignettes_data, network_data, first_n=None):
 
     for v_id, vignette in tqdm(vignettes_data.items(), desc="Casecards"):
         card = vignette["card"]
-        net_name = card.get("network_name", "G")  # default to G
+        net_name = card["network_name"]
         network = network_data.get(net_name)
 
         if network is None:
