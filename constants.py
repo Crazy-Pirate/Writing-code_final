@@ -25,5 +25,5 @@ VIGNETTES_FILE = "vignettes.json"
 RESULTS_FILE = "experimental_results.json"
 
 RESULTS_OBS_FILE = "results_obs.p"
-RESULTS_CF_DISABLEMENT_FILE = "results_counter_dis.p"
+RESULTS_CF_DISABLEMENT_FILE = "results_counter_diss.p"
 RESULTS_CF_SUFFICIENCY_FILE = "results_counter_suff.p"

@@ -1,11 +1,9 @@
-import numpy as np
 from helpers import make_twin_network, count_disabled_symptoms, get_symptom_nodes, noisy_or
+from preprocessing import SEVERITY_MAPPING  # ✅ Use centralized mapping
+#from utils import load_from_json  # ✅ only if used during testing
 
-from utils import normalize_dict, load_from_json
-from constants import VIGNETTES_FILE, NETWORKS_FILE
-from helpers import build_disease_graph
+RISK_BOOST = 5.0  # ✅ Tunable — can adjust to control impact of risk factors
 
-RISK_BOOST = 1.5 
 
 def get_evidence_from_casecard(card):
     """
@@ -13,23 +11,31 @@ def get_evidence_from_casecard(card):
     returning real-valued severity + boosted risk.
     """
     evidence = {}
-    # severity map
-    sev_map = {
-        "NOT_PRESENT": 0.0,
-        "MILD":       0.3,
-        "MODERATE":   0.6,
-        "PRESENT":    0.9,
-        "SEVERE":     1.0,
-    }
-    # symptoms
-    for sym in card.get("symptoms", []):
+    inner = card  # ✅ Matches OG code structure
+
+    # ✅ SYMPTOMS
+    for sym in inner.get("symptoms", []):
+        # Skip if label is 'Super' or concept ID is missing
+        if sym.get("label") == "Super" or sym.get("concept", {}).get("id") is None:
+            continue
         sid = sym["concept"]["id"]
-        evidence[sid] = sym.get("severity_numeric", sev_map.get(
-            sym.get("severity", "PRESENT").upper(), 0.9))
-    # risk factors
-    for rf in card.get("risk_factors", []):
-        rid = rf["concept"]["id"]
-        evidence[rid] = max(evidence.get(rid, 0), 1.0) * RISK_BOOST
+
+        # Use precomputed severity_numeric if present; fallback to severity string
+        if "severity_numeric" in sym:
+            sev_num = sym["severity_numeric"]
+        else:
+            sev = sym.get("severity", "NOT_PRESENT").upper()
+            sev_num = SEVERITY_MAPPING.get(sev, 1.0 if sev != "NOT_PRESENT" else 0.0)
+        evidence[sid] = sev_num
+
+    # ✅ RISK FACTORS
+    for rf in inner.get("risk_factors", []):
+        if rf.get("label") != "Risk" or rf.get("concept", {}).get("id") is None:
+            continue
+        if rf.get("presence", "").upper() == "PRESENT":
+            rid = rf["concept"]["id"]
+            evidence[rid] = RISK_BOOST  # ✅ Fixed boost, only if present
+
     return evidence
 
 
@@ -41,13 +47,11 @@ def posterior_inference(network, evidence):
             parents = node.get("parents", [])
             results[node_id] = noisy_or(parents, network, evidence)
         elif node.get("label") == "Risk":
-            # Just return 1.0 if present in evidence, else 0.0
             results[node_id] = evidence.get(node_id, 0.0)
-    # ensure we always return a complete dict
-    from utils import normalize_dict
     if not results:
         print("[ERROR] posterior_inference: no scores computed!")
-    return normalize_dict(results)
+    return results  # ✅ no normalization
+
 
 
 def expected_disablement(network, evidence, disease_ids, symptom_nodes):
@@ -63,10 +67,9 @@ def expected_disablement(network, evidence, disease_ids, symptom_nodes):
         count = count_disabled_symptoms(network, symptom_nodes, original_values, cf_values, recovery=False)
         print(f"[Disablement] {disease_id} → score: {count:.3f}")
         results[disease_id] = count
-    from utils import normalize_dict
     if not results:
         print("[ERROR] expected_disablement: no scores computed!")
-    return normalize_dict(results)
+    return results 
 
 
 def expected_sufficiency(network, evidence, disease_ids, symptom_nodes):
@@ -82,13 +85,8 @@ def expected_sufficiency(network, evidence, disease_ids, symptom_nodes):
         count = count_disabled_symptoms(network, symptom_nodes, original_values, cf_values, recovery=True)
         print(f"[Sufficiency] {disease_id} → score: {count:.3f}")
         results[disease_id] = count
-    from utils import normalize_dict
     if not results:
         print("[ERROR] expected_sufficiency: no scores computed!")
-    return normalize_dict(results)
+    return results 
 
 
-
-__all__ = ["get_evidence_from_casecard", "posterior_inference",
-           "expected_disablement", "expected_sufficiency",
-           "create_marginals_files"]

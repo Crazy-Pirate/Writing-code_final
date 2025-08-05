@@ -7,15 +7,18 @@ from scipy.stats import binomtest
 from constants import NETWORKS_FILE
 from utils import load_from_json
 
+# ------------------------------------------------------------------------
+# CONFIG
+# ------------------------------------------------------------------------
+THRESH = 0.3  # threshold for deciding symptom “presence” in counterfactuals
+
 
 # ------------------------------------------------------------------------
 # DATA LOADING
 # ------------------------------------------------------------------------
-
 @lru_cache(maxsize=1)
 def load_networks(datapath, filename=NETWORKS_FILE):
-    """Load and cache the disease network."""
-    # allow datapath as str or Path
+    """Load and cache the disease network JSON."""
     from pathlib import Path
     datapath = Path(datapath)
     return load_from_json(datapath / filename)
@@ -24,9 +27,8 @@ def load_networks(datapath, filename=NETWORKS_FILE):
 # ------------------------------------------------------------------------
 # NETWORK STRUCTURE HELPERS
 # ------------------------------------------------------------------------
-
 def build_disease_graph(network: dict):
-    """Create a directed graph (DAG) from the network."""
+    """Create a directed graph (DAG) from the network dict."""
     G = nx.DiGraph()
     for node_id, node in network.items():
         G.add_node(node_id, **node)
@@ -34,68 +36,66 @@ def build_disease_graph(network: dict):
             G.add_edge(parent, node_id)
     return G
 
-
 def get_symptom_nodes(network: dict):
-    """Return nodes labeled as 'Symptom'."""
-    return [node_id for node_id, data in network.items() if data.get("label") == "Symptom"]
-
+    """Return all node IDs labeled as 'Symptom'."""
+    return [nid for nid, data in network.items() if data.get("label") == "Symptom"]
 
 def get_risk_nodes(network: dict):
-    """Return nodes labeled as 'Risk'."""
-    return [node_id for node_id, data in network.items() if data.get("label") == "Risk"]
+    """Return all node IDs labeled as 'Risk'."""
+    return [nid for nid, data in network.items() if data.get("label") == "Risk"]
 
 
 # ------------------------------------------------------------------------
 # BAYESIAN INFERENCE UTILITIES
 # ------------------------------------------------------------------------
-
 def noisy_or(parents, network, input_values, epsilon=1e-9):
     """
-    Compute Noisy-OR probability for a node given its parents.
-    input_values: dict of {node_id: value between 0 and 1}
+    Compute Noisy-OR P(node=1 | parents, evidence).
+    - parents: list of parent node IDs
+    - network: dict of node definitions (with 'cpt')
+    - input_values: {node_id: value ∈ [0,1.2]} from evidence
     """
     probs = []
-    for parent_id in parents:
-        prob_true = input_values.get(parent_id, 0.0)
-        link_strength = 1.0 - network[parent_id].get("cpt", [1.0, 0.0])[0]
-        probs.append(1.0 - link_strength ** prob_true)
+    for pid in parents:
+        p_val = input_values.get(pid, 0.0)
+        # link_strength = 1 − leak_prob = 1 − CPT[parent=0]
+        leak = network[pid].get("cpt", [1.0, 0.0])[0]
+        link_strength = 1.0 - leak
+        # generalize to real‐valued p_val by exponentiation
+        adjusted = link_strength * p_val  # Scale link by severity
+        adjusted = min(adjusted, 1.0)     # clamp to [0, 1] to avoid overdrive
+        probs.append(1.0 - adjusted)
+
     if not probs:
         return 0.0
-    # no parents → no activation
-    return 1.0 - np.prod([1.0 - p + epsilon for p in probs])  # avoid underflow
+
+    # Combine with standard Noisy-OR product rule
+    return 1.0 - np.prod([1.0 - p + epsilon for p in probs])
 
 
 # ------------------------------------------------------------------------
 # COUNTERFACTUAL INFERENCE UTILITIES
 # ------------------------------------------------------------------------
-
 def make_twin_network(original_network: dict, disable=None, force=None):
     """
-    Create a twin network for counterfactual reasoning.
-    If `disable` is set, that disease is turned off in the twin (CPT = [1.0, 0.0]).
-    If `force` is set, that disease is turned on in the twin (CPT = [0.0, 1.0]).
+    Return a *copy* of original_network where one disease node’s CPT
+    is overridden to simulate an intervention:
+
+      - disable=disease_id → CPT = [1.0, 0.0] (always False)
+      - force=disease_id   → CPT = [0.0, 1.0] (always True)
+
+    This replaces the OG “append _cf” approach so that posterior_inference
+    on the twin_net actually differs from the original.
     """
-    twin_net = copy.deepcopy(original_network)
-    # deep copy to avoid mutating the original
+    twin = copy.deepcopy(original_network)
 
-    for node_id, node in original_network.items():
-        twin_id = f"{node_id}_cf"
-        twin_node = {
-            "label": node.get("label", ""),
-            "parents": [f"{p}_cf" for p in node.get("parents", [])],
-            "cpt": copy.deepcopy(node.get("cpt", [1.0, 0.0])),
-        }
+    # Apply the intervention on the specified node
+    if disable and disable in twin:
+        twin[disable]["cpt"] = [1.0, 0.0]
+    if force and force in twin:
+        twin[force]["cpt"] = [0.0, 1.0]
 
-        # Force intervention if needed
-        if disable == node_id:
-            twin_node["cpt"] = [1.0, 0.0]  # Disease always False
-        elif force == node_id:
-            twin_node["cpt"] = [0.0, 1.0]  # Disease always True
-
-        twin_net[twin_id] = twin_node
-
-    return twin_net
-
+    return twin
 
 
 def count_disabled_symptoms(network: dict,
@@ -104,67 +104,51 @@ def count_disabled_symptoms(network: dict,
                             counterfactual_values: dict,
                             recovery=False):
     """
-    Now: weight each symptom change by its severity.
-    - For disablement (recovery=False), if symptom S disappears (orig ≥ .5 → cf < .5),
-      add orig‐severity to the total.
-    - For sufficiency (recovery=True), if S appears (orig < .5 → cf ≥ .5),
-      add cf‐severity to the total.
+    Compute disablement or sufficiency using actual difference in symptom probability.
+    - For disablement: sum how much symptom probability *drops*
+    - For sufficiency: sum how much symptom probability *rises*
     """
-    total_weight = 0.0
+    total = 0.0
     for sid in symptom_nodes:
         orig = original_values.get(sid, 0.0)
         cf   = counterfactual_values.get(sid, 0.0)
 
-        if not recovery:
-            if orig >= 0.5 and cf < 0.5:
-                total_weight += orig
-        else:
-            if orig < 0.5 and cf >= 0.5:
-                total_weight += cf
+        delta = orig - cf if not recovery else cf - orig
+        if delta > 0:
+            total += delta
 
-    return total_weight # weighted by severity numeric
-
-
+    return total
 
 
 
 # ------------------------------------------------------------------------
-# DOCTOR DIFFERENTIAL EVALUATION
+# DOCTOR DIFFERENTIAL EVALUATION (unchanged)
 # ------------------------------------------------------------------------
-
 def get_doctor_differential(li):
     return [val["concept"]["id"] for val in li if val["concept"]["id"] is not None]
 
-
 def produce_differentials(card):
-    return dict(
-        [
-            [val["user"]["id"], get_doctor_differential(val["doctor_diseases"])]
-            for val in card["outcomes"]
-            if "doctor_diseases" in val
-        ]
-    )
-
+    return {
+        val["user"]["id"]: get_doctor_differential(val["doctor_diseases"])
+        for val in card.get("outcomes", [])
+        if "doctor_diseases" in val
+    }
 
 def doctor_top_ns(card, true_disease):
-    differentials = produce_differentials(card)
     return [
-        [key, len(val), 1 if true_disease in val else 0]
-        for key, val in differentials.items()
+        [uid, len(diff), 1 if true_disease in diff else 0]
+        for uid, diff in produce_differentials(card).items()
     ]
 
 
 # ------------------------------------------------------------------------
-# STATISTICS / DEBUGGING
+# STATISTICS / DEBUGGING (unchanged)
 # ------------------------------------------------------------------------
-
 def mean_list(li):
     return "none" if not li else np.mean(li)
 
-
-def bintest(x, y, comf_thresh):
-    if comf_thresh == 0:
+def bintest(x, y, conf_thresh):
+    if conf_thresh == 0:
         return sum(x) >= sum(y)
-    p_val = binomtest(sum(x), n=len(x), p=sum(y) / len(y), alternative="greater").pvalue
-    return p_val < comf_thresh
-
+    p_val = binomtest(sum(x), n=len(x), p=(sum(y) / len(y)), alternative="greater").pvalue
+    return p_val < conf_thresh

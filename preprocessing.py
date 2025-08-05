@@ -40,6 +40,11 @@ def preprocess_vignettes(path: Path = DATA_PATH / VIGNETTES_FILE):
     vignettes = convert_symptom_severity(vignettes)
     return vignettes
 
+def save_preprocessed_vignettes(output_path: Path, vignettes: dict):
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(vignettes, f, indent=2)
+
+        
 if __name__ == "__main__":
     v = preprocess_vignettes()
     import json
