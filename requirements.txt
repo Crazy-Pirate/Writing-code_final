@@ -1,0 +1,11 @@
+### 📦 `requirements.txt`
+
+
+networkx
+numpy
+scipy
+matplotlib
+pandas
+
+
+#*(You can add/remove packages based on your exact usage)*
