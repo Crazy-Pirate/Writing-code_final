@@ -1,7 +1,3 @@
-Here is a complete `README.md` file tailored for your modified causal diagnosis project based on the Richens et al. (2020) paper:
-
----
-
 # Counterfactual Medical Diagnosis with Causal Machine Learning (Modified)
 
 This project is a **modification of the original causal inference framework** from the paper:
@@ -151,5 +147,6 @@ This will compute evaluation metrics or inspect the results.
 
 * Original code and dataset courtesy of Babylon Health and the authors.
 * Modified by me for research on improved causal diagnosis scoring with symptom severity and risk awareness.
+
 
 
